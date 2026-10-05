@@ -1,0 +1,94 @@
+{
+  "name": "B2B AI Support Error Handling & Rollback Pipeline",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "node-error-trigger",
+      "name": "Global Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const execution = $input.first().json.execution;\nconst workflow = $input.first().json.workflow;\n\nreturn [{\n  json: {\n    execution_id: execution.id,\n    workflow_name: workflow.name,\n    error_message: execution.error ? execution.error.message : 'Unknown runtime failure',\n    error_stack: execution.error ? execution.error.stack : '',\n    failed_at: new Date().toISOString(),\n    step_name: 'N8N_WORKFLOW_FAILURE_ROLLBACK'\n  }\n}];"
+      },
+      "id": "node-format-error-payload",
+      "name": "Format Error Diagnostics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO execution_logs (step_name, status, confidence_score, latency_ms, input_payload, output_payload, error_message) VALUES ('N8N_WORKFLOW_FAILURE_ROLLBACK', 'ERROR', 0.000, 0, '{\"execution_id\": \"{{ $json.execution_id }}\"}'::jsonb, '{\"workflow\": \"{{ $json.workflow_name }}\"}'::jsonb, '{{ $json.error_message }}');"
+      },
+      "id": "node-postgres-rollback-log",
+      "name": "Postgres: Audit Rollback Logger",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [
+        720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $('Format Error Diagnostics').item.json;\nreturn [{\n  json: {\n    channel: \"#devops-support-alerts\",\n    text: `🔥 *CRITICAL: n8n Workflow Failure Detected*`,\n    attachments: [{\n      color: \"#ef4444\",\n      title: `Workflow: ${item.workflow_name} (ID: ${item.execution_id})`,\n      fields: [\n        { title: \"Error Message\", value: item.error_message, short: false },\n        { title: \"Failed At\", value: item.failed_at, short: true },\n        { title: \"Audit Status\", value: \"Logged to PostgreSQL execution_logs\", short: true }\n      ]\n    }]\n  }\n}];"
+      },
+      "id": "node-devops-alert",
+      "name": "Format DevOps Critical Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Global Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error Diagnostics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Diagnostics": {
+      "main": [
+        [
+          {
+            "node": "Postgres: Audit Rollback Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres: Audit Rollback Logger": {
+      "main": [
+        [
+          {
+            "node": "Format DevOps Critical Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

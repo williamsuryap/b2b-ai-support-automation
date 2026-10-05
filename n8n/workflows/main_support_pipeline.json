@@ -1,0 +1,265 @@
+{
+  "name": "B2B AI Support Main Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ticket",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-trigger",
+      "name": "Webhook: Ingest Ticket",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT ticket_id, status, confidence_score, customer_reply, resolution_summary, actions_taken FROM tickets WHERE idempotency_key = '{{ $json.body.idempotency_key || $json.body.ticket_id }}' LIMIT 1;"
+      },
+      "id": "node-idempotency-check",
+      "name": "Postgres: Idempotency Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [
+        420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.ticket_id !== undefined }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-if-cached",
+      "name": "If Already Processed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        640,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ticket_id: $json.ticket_id, status: $json.status, cached: true, note: 'Served from idempotent storage' }) }}",
+        "options": {}
+      },
+      "id": "node-respond-cached",
+      "name": "Respond Cached Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        860,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://backend:8000/api/v1/process-ticket",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Webhook: Ingest Ticket').item.json.body) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "node-http-fastapi",
+      "name": "HTTP Request: FastAPI AI Engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        860,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.status }}",
+                    "operation": "equals",
+                    "value2": "RESOLVED"
+                  }
+                ]
+              }
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.status }}",
+                    "operation": "equals",
+                    "value2": "ESCALATED"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "id": "node-switch-status",
+      "name": "Switch: Response Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nreturn [{\n  json: {\n    channel: \"#customer-support-resolutions\",\n    text: `✅ *Ticket Auto-Resolved* [${item.ticket_id}]`,\n    attachments: [{\n      color: \"#22c55e\",\n      fields: [\n        { title: \"Category\", value: item.category, short: true },\n        { title: \"Confidence Score\", value: `${(item.confidence_score * 100).toFixed(1)}%`, short: true },\n        { title: \"Actions Executed\", value: JSON.stringify(item.actions_taken), short: false },\n        { title: \"Drafted Customer Reply\", value: item.customer_reply, short: false }\n      ]\n    }]\n  }\n}];"
+      },
+      "id": "node-format-slack-resolved",
+      "name": "Format Slack Resolution Card",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nreturn [{\n  json: {\n    name: `🚨 ESCALATION: ${item.ticket_id} - ${item.category}`,\n    description: `### Human Triage Required\\n\\n**Reasoning:** ${item.reasoning}\\n**Confidence:** ${(item.confidence_score * 100).toFixed(1)}% (Threshold: 80%)\\n\\n**Customer Response Sent:**\\n>${item.customer_reply}`,\n    priority: 1,\n    tags: [\"ai-escalation\", \"tier-2-review\", item.category.toLowerCase()]\n  }\n}];"
+      },
+      "id": "node-format-clickup-escalated",
+      "name": "Format ClickUp Escalation Task",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($('HTTP Request: FastAPI AI Engine').item.json) }}",
+        "options": {}
+      },
+      "id": "node-respond-client",
+      "name": "Respond to Ingestion Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1600,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: Ingest Ticket": {
+      "main": [
+        [
+          {
+            "node": "Postgres: Idempotency Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres: Idempotency Check": {
+      "main": [
+        [
+          {
+            "node": "If Already Processed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Already Processed?": {
+      "main": [
+        [
+          {
+            "node": "Respond Cached Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request: FastAPI AI Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request: FastAPI AI Engine": {
+      "main": [
+        [
+          {
+            "node": "Switch: Response Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch: Response Status": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Resolution Card",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format ClickUp Escalation Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Resolution Card": {
+      "main": [
+        [
+          {
+            "node": "Respond to Ingestion Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format ClickUp Escalation Task": {
+      "main": [
+        [
+          {
+            "node": "Respond to Ingestion Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
